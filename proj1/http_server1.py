@@ -51,7 +51,11 @@ def run_server(host, port):
             client_sock, client_addr = accept_socket.accept()
             print(f"Accepted connection from {client_addr}...")
 
-            handle_client(client_sock)
+            try:
+                handle_client(client_sock)
+            except Exception as e:
+                print("Oops, error occurred...")
+                print(e)
 
 
 def handle_client(client_sock: socket.socket):
