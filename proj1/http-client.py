@@ -1,8 +1,9 @@
 import sys
 import socket
-from header import Header
 from typing import Dict, Generator
-from urllib.parse import urlparse
+
+from header import Header
+from urlparse import urlparse
 
 BUF_SIZE = 16384
 
@@ -11,14 +12,15 @@ def exit_err(msg: str, code=1):
     """Print error msg to stderr and exit"""
     sys.stderr.write(msg)
     sys.exit(code)
-    
+
+
 class Response:
     def __init__(self, header: Header, payload: str):
         self.header = header
         self.payload = payload
         self.http_code = header.http_code
         self.http_msg = header.http_msg
-    
+
     def __repr__(self):
         return f"<Response {self.http_code}>"
 
@@ -35,9 +37,7 @@ def do_http_request(url, n_redirs=0):
             f"Error: {sys.argv[0]} can only handle http. Must prepend url with 'http://'.\n"
         )
     if o.scheme.lower() != "http":
-        exit_err(
-            f"Error: {sys.argv[0]} can only handle http, not {o.scheme}.\n"
-        )
+        exit_err(f"Error: {sys.argv[0]} can only handle http, not {o.scheme}.\n")
 
     path = o.path if o.path else "/"
     port = o.port if o.port else 80
@@ -49,7 +49,9 @@ def do_http_request(url, n_redirs=0):
 User-Agent: http-client.py/0.1
 Host: {host}
 
-""".replace("\n", "\r\n")
+""".replace(
+        "\n", "\r\n"
+    )
 
     ### Do request
     buf = b""
@@ -68,13 +70,23 @@ Host: {host}
     header_bytes, payload_bytes = buf.split(b"\r\n\r\n", 1)
 
     header = Header.from_raw(header_bytes)
-    if "Content-Type" not in header:
+
+    ctype = header.get("Content-Type")
+    if not ctype:
         exit_err("Error: Content-Type not specified in response header.")
     
-    if not header["Content-Type"].startswith("text/html"):
+    if not ctype.startswith("text/html"):
         exit_err("Error: Content-Type is not text/html.")
 
-    payload = payload_bytes.decode()
+    charset = "utf-8"
+    i = ctype.find("; ")
+    if i != -1:
+        tmp = ctype[i+2:]
+        k, v = tmp.strip().split("=")
+        if k == "charset":
+            charset = v
+
+    payload = payload_bytes.decode(charset)
 
     ### Handle responses
 
@@ -89,7 +101,7 @@ Host: {host}
         sys.stdout.write(payload)
         sys.stdout.write("\n")
         sys.exit(1)
-        
+
     return Response(header, payload)
 
 

@@ -1,4 +1,4 @@
-from typing import Dict, Generator
+from typing import Dict, Generator, Optional
 
 class Header:
     """Wrapper around a HTTP Header. Acts like a dict"""
@@ -39,6 +39,9 @@ class Header:
 
     def __iter__(self):
         return self._header.__iter__()
+
+    def get(self, key: str) -> Optional[str]:
+        return self._header.get(key)
 
 
 
