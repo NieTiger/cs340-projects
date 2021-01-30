@@ -1,40 +1,42 @@
 """
 Multi-connection web server
 """
+import select
 import socket
 import sys
-from typing import ByteString
 from pathlib import Path
-from typing import Union
+from typing import ByteString, Dict, Union
 
 from header import Header
 
 BUF_SIZE = 16384
 HOST = "127.0.0.1"
-BACKLOG = 1
+BACKLOG = 8
 
 HTTP_MSG = {
-    200: 'OK',
-    301: 'Moved Permanently',
-    302: 'Found',
-    400: 'Bad Request',
-    401: 'Unauthorized',
-    402: 'Payment Required',
-    403: 'Forbidden',
-    404: 'Not Found',
-    405: 'Method Not Allowed',
-    500: 'Internal Server Error',
+    200: "OK",
+    301: "Moved Permanently",
+    302: "Found",
+    400: "Bad Request",
+    401: "Unauthorized",
+    402: "Payment Required",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    500: "Internal Server Error",
 }
 
 RESP_HEADER_TMPL = """HTTP/1.0 {code} {msg}
 Content-Length: {length}
 Content-Type: {content_type}
 
-""".replace("\n", "\r\n")
+""".replace(
+    "\n", "\r\n"
+)
 
 HTTP_ERROR_TMPL = """
 <p>File not found.</p>
-""".encode()
+""".strip().encode()
 
 filepath = Path(".")
 
@@ -48,75 +50,124 @@ def run_server(host, port):
         accept_socket.listen(BACKLOG)
         print(f"Listening on http://{host}:{port}")
 
-        # Listen on the socket forever
-        while True:
-            # Get client socket and address
-            client_sock, client_addr = accept_socket.accept()
-            print(f"Accepted connection from {client_addr}...")
+        # Sockets from which we expect to read
+        inputs = [accept_socket]
+        # Sockets from which we expect to write
+        outputs = []
+        # Outgoing message queues (byte buffer)
+        message_queues: Dict[socket.socket, bytearray] = {}
 
-            try:
-                handle_client(client_sock)
-            except Exception as e:
-                print("Oops, error occurred...")
-                print(e)
+        def release_resources(s: socket.socket):
+            inputs.remove(s)
+            if s in outputs:
+                outputs.remove(s)
+            s.close()
+            del message_queues[s]
 
 
-def handle_client(client_sock: socket.socket):
-    # Read header
-    header_buf = b""
-    payload_buf = b""
+        while inputs:
+            print("Waiting for the next event", file=sys.stderr)
+            readable, writable, exceptional = select.select(inputs, outputs, inputs)
+        
+            for s in readable:
 
-    with client_sock:
-        while True:
-            tmp = client_sock.recv(BUF_SIZE)
+                if s is accept_socket:
+                    ### Case if 
+                    # Get client socket and address
+                    client_sock, client_addr = accept_socket.accept()
+                    print(f"Accepted connection from {client_addr}...")
+                    client_sock.setblocking(0)
+                    inputs.append(client_sock)
 
-            if not tmp:
-                break
-            i = tmp.find(b"\r\n\r\n")
+                    # read/write queues
+                    message_queues[client_sock] = b""
 
-            if i != -1:
-                header_buf += tmp[:i]
-                payload_buf += tmp[i:]
-                break
+                else:
+                    # s is a client_sock
+                    data = s.recv(1024)
 
-            header_buf += tmp
+                    if data:
+                        # Client sock has data!
+                        # handle that here
 
-        header = Header.from_raw(header_buf, request=False)
+                        # If the message_queue for this client forms
+                        # a valid HTTP request, handle that
+                        message_queues[s] += data
+                        if b"\r\n\r\n" in message_queues[s]:
+                            # Receive a full HTTP header
+                            outputs.append(s)
+                            try:
+                                message_queues[s] = handle_http_header(message_queues[s])
+                            except Exception as e:
+                                print(f"Oops - error on {s.getpeername()}: {e}", file=sys.stderr)
+                                release_resources(s)
 
-        if header.http_path.endswith(".htm") or header.http_path.endswith(".html"):
-            # Check if path exists
-            path = filepath / Path(header.http_path[1:])
-            print(path)
-            if path.exists():
-                print("File exists, trying to send file")
-                # file exists, send file
-                client_sock.sendall(RESP_HEADER_TMPL.format(code=200,
-                                                            msg=HTTP_MSG[200],
-                                                            length=path.stat().st_size,
-                                                            content_type="text/html").encode())
-                send_file_to_sock(client_sock, path)
-            else:
-                # file doesn't exist
-                print("File doesnt exist, sending error msg")
-                client_sock.sendall(RESP_HEADER_TMPL.format(code=403,
-                                                            msg=HTTP_MSG[403],
-                                                            length=len(
-                                                                HTTP_ERROR_TMPL),
-                                                            content_type="text/html").encode())
+                    else:
+                        # Empty - connection must be closed
+                        print("closing", client_addr, file=sys.stderr)
+                        release_resources(s)
+            
+            for s in writable:
+                msg: bytearray = message_queues[s]
+                if not msg:
+                    print(s.getpeername(), 'queue empty', file=sys.stderr)
+                    release_resources(s)
+                else:
+                    # There is a message available to write to the given socket
+                    print(f"sending to {s.getpeername()}", file=sys.stderr)
+                    i = s.send(msg)
+                    message_queues[s] = msg[i:]
+            
+            for s in exceptional:
+                print('Oops - ', s.getpeername(), file=sys.stderr)
+                release_resources(s)
+
+
+def handle_http_header(header_buf: bytearray) -> bytearray:
+    header = Header.from_raw(header_buf)
+    output_buf = b""
+
+    if header.http_path.endswith(".htm") or header.http_path.endswith(".html"):
+        # Check if path exists
+        path = filepath / Path(header.http_path[1:])
+        print(path)
+        if path.exists():
+            print("File exists, trying to send file")
+
+            # file exists, send file
+            output_buf += RESP_HEADER_TMPL.format(
+                code=200,
+                msg=HTTP_MSG[200],
+                length=path.stat().st_size,
+                content_type="text/html",
+            ).encode()
+
+            with path.open("rb") as fptr:
+                output_buf += fptr.read()
 
         else:
-            # Not asking for a HTML file, we don't know how to handle that
-            print("Not asking for html, abort")
-            client_sock.sendall(RESP_HEADER_TMPL.format(code=404,
-                                                        msg=HTTP_MSG[404],
-                                                        length=len(
-                                                            HTTP_ERROR_TMPL),
-                                                        content_type="text/html").encode())
+            # file doesn't exist
+            print("File doesnt exist, sending error msg")
+            output_buf += RESP_HEADER_TMPL.format(
+                code=403,
+                msg=HTTP_MSG[403],
+                length=len(HTTP_ERROR_TMPL),
+                content_type="text/html",
+            ).encode()
+            output_buf += HTTP_ERROR_TMPL
 
-
-def send_file_to_sock(sock: socket.socket, path: Path):
-    with path.open("rb") as fptr:
-        sock.sendfile(fptr)
+    else:
+        # Not asking for a HTML file, we don't know how to handle that
+        print("Not asking for html, abort")
+        output_buf += RESP_HEADER_TMPL.format(
+            code=404,
+            msg=HTTP_MSG[404],
+            length=len(HTTP_ERROR_TMPL),
+            content_type="text/html",
+        ).encode()
+        output_buf += HTTP_ERROR_TMPL
+    
+    return output_buf
 
 
 if __name__ == "__main__":
