@@ -69,19 +69,17 @@ def handle_client(client_sock: socket.socket):
     with client_sock:
         while True:
             tmp = client_sock.recv(BUF_SIZE)
-
             if not tmp:
-                break
-            i = tmp.find(b"\r\n\r\n")
-
-            if i != -1:
-                header_buf += tmp[:i]
-                payload_buf += tmp[i:]
                 break
 
             header_buf += tmp
+            i = header_buf.rfind(b"\r\n\r\n")
+            if i != -1:
+                header_buf = header_buf[:i]
+                payload_buf += header_buf[i:]
+                break
 
-        header = Header.from_raw(header_buf, request=False)
+        header = Header.from_raw(header_buf)
 
         if header.http_path.endswith(".htm") or header.http_path.endswith(".html"):
             # Check if path exists
