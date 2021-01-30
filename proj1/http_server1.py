@@ -103,6 +103,7 @@ def handle_client(client_sock: socket.socket):
                                                             length=len(
                                                                 HTTP_ERROR_TMPL),
                                                             content_type="text/html").encode())
+                client_sock.sendall(HTTP_ERROR_TMPL)
 
         else:
             # Not asking for a HTML file, we don't know how to handle that
@@ -112,6 +113,7 @@ def handle_client(client_sock: socket.socket):
                                                         length=len(
                                                             HTTP_ERROR_TMPL),
                                                         content_type="text/html").encode())
+            client_sock.sendall(HTTP_ERROR_TMPL)
 
 
 def send_file_to_sock(sock: socket.socket, path: Path):
