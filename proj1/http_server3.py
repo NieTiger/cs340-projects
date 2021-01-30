@@ -1,13 +1,14 @@
 """
-Multi-connection web server
+Multi-connection, json web server
 """
 import select
 import socket
 import sys
+import json
 from pathlib import Path
 from typing import ByteString, Dict, Union
 
-from header import Header
+from header import Header, parse_dict
 
 BUF_SIZE = 16384
 HOST = "127.0.0.1"
@@ -37,6 +38,8 @@ Content-Type: {content_type}
 HTTP_ERROR_TMPL = """
 <p>File not found.</p>
 """.strip().encode()
+
+JSON_ERR = json.dumps({"error": "bad request"}).encode()
 
 filepath = Path(".")
 
@@ -155,10 +158,56 @@ def handle_http_header(header_buf: bytearray) -> bytearray:
                 content_type="text/html",
             ).encode()
             output_buf += HTTP_ERROR_TMPL
+        
+    elif header.http_path.startswith("/product"):
+        i = header.http_path.find("?")
+        if i == -1:
+            msg = "bad request"
+            output_buf += RESP_HEADER_TMPL.format(
+                code=400,
+                msg=HTTP_MSG[400],
+                length=len(msg),
+                content_type="text/html",
+            ).encode()
+            output_buf += msg.encode()
+
+        else:
+            # parse query
+            try:
+                query = parse_dict(header.http_path[i+1:], "=", "&")
+                operands = [float(v) for v in query.values()]
+                res = 1
+                for v in operands:
+                    res *= float(v)
+
+                msg = json.dumps({"operation": "product", 
+                            "operands": operands,
+                            "result" : res})
+
+                output_buf += RESP_HEADER_TMPL.format(
+                    code=200,
+                    msg=HTTP_MSG[200],
+                    length=len(msg),
+                    content_type="application/json",
+                ).encode()
+                output_buf += msg.encode()
+
+            except Exception as e:
+                # bad request
+                print("400 - ", e, file=sys.stderr)
+                output_buf += RESP_HEADER_TMPL.format(
+                    code=400,
+                    msg=HTTP_MSG[400],
+                    length=len(JSON_ERR),
+                    content_type="application/json",
+                ).encode()
+                output_buf += JSON_ERR
+
+            pass
 
     else:
         # Not asking for a HTML file, we don't know how to handle that
-        print("Not asking for html, abort")
+        print("404 not found")
         output_buf += RESP_HEADER_TMPL.format(
             code=404,
             msg=HTTP_MSG[404],
