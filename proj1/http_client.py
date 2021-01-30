@@ -69,7 +69,7 @@ Host: {host}
     ### Parse results
     header_bytes, payload_bytes = buf.split(b"\r\n\r\n", 1)
 
-    header = Header.from_raw(header_bytes)
+    header = Header.from_raw(header_bytes, request=False)
 
     ctype = header.get("Content-Type")
     if not ctype:

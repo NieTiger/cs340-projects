@@ -6,18 +6,17 @@ class Header:
     def __init__(self, header_str: str, request=True):
         self.header_str: str = header_str
 
-
-        http_line, header_str = header_str.split("\r\n", 1)
+        http_line, header_str = header_str.strip().split("\r\n", 1)
         http_lst = http_line.split(" ")
 
         if request:
-            self.http_version = http_lst[0]
-            self.http_code = int(http_lst[1])
-            self.http_msg = " ".join(http_lst[2:])
-        else:
             self.http_method = http_lst[0]
             self.http_path = http_lst[1]
             self.http_version = http_lst[2]
+        else:
+            self.http_version = http_lst[0]
+            self.http_code = int(http_lst[1])
+            self.http_msg = " ".join(http_lst[2:])
 
         self._header: Dict[str, str] = parse_dict(header_str, ": ", "\r\n")
     
