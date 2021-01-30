@@ -1,3 +1,6 @@
+"""
+Single-connection web server
+"""
 import socket
 import sys
 from typing import ByteString
