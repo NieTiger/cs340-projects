@@ -1,5 +1,5 @@
 import struct
-import threading
+from concurrent.futures import ThreadPoolExecutor
 import queue
 
 # do not import anything else from loss_socket besides LossyUDP
@@ -33,8 +33,11 @@ class Streamer:
         self.recv_expect_seq_n = 0
         self.buf_q = queue.PriorityQueue()
 
-        threading.Thread(target=self.recv_bg, daemon=True).start()
+        # listener thread
+        self.closed = False
 
+        executor = ThreadPoolExecutor(max_workers=1)
+        executor.submit(self.listener)
 
     def send(self, data_bytes: bytes) -> None:
         """Note that data_bytes can be larger than one packet."""
@@ -43,40 +46,44 @@ class Streamer:
                 recv_buf_size = len(data_bytes) - self._PAYLOAD_SIZE
             else:
                 recv_buf_size = 0
-            
-            header_buf = struct.pack(self._HEADER_FORMAT, self.send_next_seq_n, recv_buf_size)
+
+            header_buf = struct.pack(
+                self._HEADER_FORMAT, self.send_next_seq_n, recv_buf_size
+            )
 
             send_buf = header_buf + data_bytes[: self._PAYLOAD_SIZE]
             self.socket.sendto(send_buf, (self.dst_ip, self.dst_port))
             data_bytes = data_bytes[self._PAYLOAD_SIZE :]
 
             self.send_next_seq_n += 1
-        
+
     def recv(self) -> bytes:
         """Blocks (waits) if no data is ready to be read from the connection."""
         while True:
             if self.buf_q.qsize() and self.buf_q.queue[0][0] == self.recv_expect_seq_n:
                 break
-        
+
         self.recv_expect_seq_n += 1
         _, data = self.buf_q.get()
         return data
 
+    def listener(self):
+        while not self.closed:
+            try:
+                buf, addr = self.socket.recvfrom()
+                seq_n, recv_buf_size = struct.unpack(
+                    self._HEADER_FORMAT, buf[: self._HEADER_SIZE]
+                )
 
-    def recv_bg(self):
-        while True:
-            buf, addr = self.socket.recvfrom()
-
-            seq_n, recv_buf_size = struct.unpack(
-                self._HEADER_FORMAT, buf[: self._HEADER_SIZE]
-            )
-
-            buf = buf[self._HEADER_SIZE :]
-            self.buf_q.put((seq_n, buf))
-
+                buf = buf[self._HEADER_SIZE :]
+                self.buf_q.put((seq_n, buf))
+            except Exception as e:
+                print("Listener died!")
+                print(e)
 
     def close(self) -> None:
         """Cleans up. It should block (wait) until the Streamer is done with all
         the necessary ACKs and retransmissions"""
         # your code goes here, especially after you add ACKs and retransmissions.
-        pass
+        self.closed = True
+        self.socket.stoprecv()
