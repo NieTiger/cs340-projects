@@ -1,4 +1,6 @@
 import struct
+import threading
+import queue
 
 # do not import anything else from loss_socket besides LossyUDP
 from lossy_socket import LossyUDP
@@ -29,7 +31,10 @@ class Streamer:
 
         # Recv info
         self.recv_expect_seq_n = 0
-        self.buf_lst = []
+        self.buf_q = queue.PriorityQueue()
+
+        threading.Thread(target=self.recv_bg, daemon=True).start()
+
 
     def send(self, data_bytes: bytes) -> None:
         """Note that data_bytes can be larger than one packet."""
@@ -46,15 +51,19 @@ class Streamer:
             data_bytes = data_bytes[self._PAYLOAD_SIZE :]
 
             self.send_next_seq_n += 1
-
+        
     def recv(self) -> bytes:
         """Blocks (waits) if no data is ready to be read from the connection."""
-        # your code goes here!  The code below should be changed!
-        if self.buf_lst and self.buf_lst[-1][0] == self.recv_expect_seq_n:
-            self.recv_expect_seq_n += 1
-            _, data = self.buf_lst.pop()
-            return data
+        while True:
+            if self.buf_q.qsize() and self.buf_q.queue[0][0] == self.recv_expect_seq_n:
+                break
+        
+        self.recv_expect_seq_n += 1
+        _, data = self.buf_q.get()
+        return data
 
+
+    def recv_bg(self):
         while True:
             buf, addr = self.socket.recvfrom()
 
@@ -63,16 +72,8 @@ class Streamer:
             )
 
             buf = buf[self._HEADER_SIZE :]
+            self.buf_q.put((seq_n, buf))
 
-            self.buf_lst.append((seq_n, buf))
-            self.buf_lst.sort(key=lambda x: x[0], reverse=True)
-
-            if self.buf_lst[-1][0] == self.recv_expect_seq_n:
-                self.recv_expect_seq_n += 1
-                _, data = self.buf_lst.pop()
-                return data
-
-        return data
 
     def close(self) -> None:
         """Cleans up. It should block (wait) until the Streamer is done with all
