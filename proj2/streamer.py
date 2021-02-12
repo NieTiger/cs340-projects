@@ -1,15 +1,27 @@
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from typing import ClassVar
+import hashlib
 import queue
 import struct
 import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+
+# do not import anything else from socket except INADDR_ANY
+from socket import INADDR_ANY
+from typing import ClassVar
 
 # do not import anything else from loss_socket besides LossyUDP
 from lossy_socket import LossyUDP
 
-# do not import anything else from socket except INADDR_ANY
-from socket import INADDR_ANY
+
+def calcHash(msg: bytes) -> bytes:
+    """Calculates the hash of a payload"""
+    return hashlib.sha256(msg).digest()
+
+
+class PacketCorruptError(ValueError):
+    """Class for when packet hash is incorrect"""
+
+    pass
 
 
 @dataclass(order=True)
@@ -19,9 +31,6 @@ class Packet:
     ### Header
     seq_n: int = 0
     recv_buf_size: int = 0
-
-    ### Hash
-    ### hash: int
 
     ### Flags
     ack: bool = False
@@ -34,23 +43,33 @@ class Packet:
     # Long: seq_n
     # Long: recv_buf_size
     # Char: flags
-    HEADER_FORMAT: ClassVar = "LLcx"
-    HEADER_SIZE: ClassVar = len(struct.pack(HEADER_FORMAT, 0, 0, b"0"))
+    HEADER_FORMAT: ClassVar = "LLB"
+
+    HEADER_SIZE: ClassVar = len(struct.pack(HEADER_FORMAT, 0, 0, 0))
+    HASH_SIZE: ClassVar = 32
     PACKET_SIZE: ClassVar = 1472
-    PAYLOAD_SIZE: ClassVar = PACKET_SIZE - HEADER_SIZE
+    PAYLOAD_SIZE: ClassVar = PACKET_SIZE - HEADER_SIZE - HASH_SIZE
 
     @classmethod
     def from_bytes(cls, buf):
+        header_bytes = buf[:cls.HEADER_SIZE]
+        _hash = buf[cls.HEADER_SIZE : cls.HEADER_SIZE + cls.HASH_SIZE]
+        payload = buf[cls.HEADER_SIZE + cls.HASH_SIZE :]
+
+        new_hash = calcHash(header_bytes + payload)
+        if new_hash != _hash:
+            raise PacketCorruptError
+
         seq_n, recv_buf_size, _flags = struct.unpack(
-            cls.HEADER_FORMAT, buf[: Packet.HEADER_SIZE]
+            cls.HEADER_FORMAT, header_bytes
         )
 
         # pack flags into a single byte like TCP
-        _flags = int.from_bytes(_flags, "little")
         ack = bool((_flags >> 3) & 1)
         fin = bool((_flags >> 7) & 1)
 
-        payload = buf[cls.HEADER_SIZE :]
+        print(f"Recv seq_n={seq_n}, ack={ack}, fin={fin}, payload={payload}")
+
         return Packet(
             seq_n=seq_n, recv_buf_size=recv_buf_size, ack=ack, fin=fin, payload=payload
         )
@@ -59,15 +78,16 @@ class Packet:
         _flags = int(self.ack) << 3
         _flags |= int(self.fin) << 7
 
-        return (
-            struct.pack(
-                self.HEADER_FORMAT,
-                self.seq_n,
-                self.recv_buf_size,
-                bytes([_flags]),
-            )
-            + self.payload
+        header_bytes = struct.pack(
+            self.HEADER_FORMAT,
+            self.seq_n,
+            self.recv_buf_size,
+            _flags,
         )
+
+        _hash = calcHash(header_bytes + self.payload)
+
+        return header_bytes + _hash + self.payload
 
 
 class Streamer:
@@ -113,8 +133,8 @@ class Streamer:
                     timeout = True
                     break
 
-        self.buf_q.get()
         self.ack = False
+        self.send_next_seq_n += 1
 
     def send(self, data_bytes: bytes) -> None:
         """Note that data_bytes can be larger than one packet."""
@@ -124,27 +144,28 @@ class Streamer:
             else:
                 recv_buf_size = 0
 
-            header_buf = Packet(
-                seq_n=self.send_next_seq_n, recv_buf_size=recv_buf_size
+            send_buf = Packet(
+                seq_n=self.send_next_seq_n,
+                recv_buf_size=recv_buf_size,
+                payload=data_bytes[: Packet.PAYLOAD_SIZE],
             ).to_bytes()
-
-            send_buf = header_buf + data_bytes[: Packet.PAYLOAD_SIZE]
             self._send(send_buf, self.ACK_TIMEOUT)
+            print(
+                f"Sent (and recv'ed ack for): {data_bytes[:Packet.PAYLOAD_SIZE]}, remaining: {data_bytes[Packet.PAYLOAD_SIZE:]}"
+            )
 
             data_bytes = data_bytes[Packet.PAYLOAD_SIZE :]
 
-            self.send_next_seq_n += 1
-
     def recv(self) -> bytes:
         """Blocks (waits) if no data is ready to be read from the connection."""
-        while True:
+        while not self.closed:
             packet = self.buf_q.get()
 
             if packet.seq_n == self.recv_expect_seq_n:
                 self.recv_expect_seq_n += 1
                 return packet.payload
 
-            elif packet.seq_n < self.recv_expect_seq_n:
+            if packet.seq_n < self.recv_expect_seq_n:
                 # This packet was received twice, ignore
                 continue
             else:
@@ -157,25 +178,33 @@ class Streamer:
                 if not buf:
                     continue
 
-                packet = Packet.from_bytes(buf)
+                try:
+                    packet = Packet.from_bytes(buf)
+                except PacketCorruptError:
+                    # Ignore corrupt packets and wait for a resend due to timeout
+                    print("Corruption detected")
+                    continue
 
                 if packet.ack:
                     self.ack = True
                     if packet.fin:
                         self.should_close = True
+                    continue
 
                 elif packet.fin:
+                    # send fin ack
                     send_buf = Packet(
                         seq_n=packet.seq_n, recv_buf_size=0, ack=True, fin=True
                     ).to_bytes()
                     self.socket.sendto(send_buf, (self.dst_ip, self.dst_port))
                     self.should_close = True
-                else:
-                    # send ack
-                    send_buf = Packet(
-                        seq_n=packet.seq_n, recv_buf_size=0, ack=True
-                    ).to_bytes()
-                    self.socket.sendto(send_buf, (self.dst_ip, self.dst_port))
+                    continue
+
+                # send ack
+                send_buf = Packet(
+                    seq_n=packet.seq_n, recv_buf_size=0, ack=True
+                ).to_bytes()
+                self.socket.sendto(send_buf, (self.dst_ip, self.dst_port))
 
                 self.buf_q.put(packet)
 
@@ -190,7 +219,11 @@ class Streamer:
         if not self.should_close:
             print(f"close called, queue size: {self.buf_q.qsize()}")
             fin_pack = Packet(seq_n=self.send_next_seq_n, fin=True)
+            # Sends and waits for FIN ACK
             self._send(fin_pack.to_bytes(), 2)
+            # Send ACK
+            ack_pack = Packet(seq_n=self.send_next_seq_n, ack=True)
+            self.socket.sendto(ack_pack.to_bytes(), (self.dst_ip, self.dst_port))
 
         self.closed = True
         self.socket.stoprecv()
