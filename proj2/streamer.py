@@ -184,7 +184,7 @@ class Streamer:
             # Check acks for inflight packets
             # iterate through inflight packets, remove those <= acked_n
             # for the packet (acked_n + 1), check timer
-            idx = 0
+            idx = -1
             resend_all = False
             for i, pack in enumerate(inflight_q):
                 if pack.seq_n <= self.acked_n:
@@ -198,7 +198,8 @@ class Streamer:
 
                     break
 
-            inflight_q = inflight_q[idx:]
+            if idx > 0:
+                inflight_q = inflight_q[idx:]
             
             if resend_all:
                 # if first packet after previous ack'ed timed out,
