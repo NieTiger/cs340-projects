@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 # do not import anything else from socket except INADDR_ANY
 from socket import INADDR_ANY
-from typing import ClassVar
+from typing import ClassVar, List
 
 # do not import anything else from loss_socket besides LossyUDP
 from lossy_socket import LossyUDP
@@ -68,7 +68,7 @@ class Packet:
         ack = bool((_flags >> 3) & 1)
         fin = bool((_flags >> 7) & 1)
 
-        print(f"Recv seq_n={seq_n}, ack={ack}, fin={fin}, payload={payload}")
+        # print(f"Recv seq_n={seq_n}, ack={ack}, fin={fin}, payload={payload}")
 
         return Packet(
             seq_n=seq_n, recv_buf_size=recv_buf_size, ack=ack, fin=fin, payload=payload
@@ -90,6 +90,14 @@ class Packet:
         return header_bytes + _hash + self.payload
 
 
+@dataclass(order=True)
+class InflightPacket:
+    seq_n: int
+    start_time: int
+    timeout_s: int
+    packet: bytes
+
+
 class Streamer:
     def __init__(self, dst_ip, dst_port, src_ip=INADDR_ANY, src_port=0):
         """Default values listen on all network interfaces, chooses a random source port,
@@ -101,43 +109,26 @@ class Streamer:
 
         # Send info
         self.send_next_seq_n = 0
-        self.ack = False
+        self.acked_n = 0
         self.ACK_TIMEOUT = 0.25  # seconds
+        self.send_q = queue.PriorityQueue()  # queue of InflightPacket
 
         # Recv info
         self.recv_expect_seq_n = 0
-        self.buf_q = queue.PriorityQueue()
+        self.recv_q = queue.PriorityQueue()
 
         # listener thread
         self.closed = False
         self.should_close = False
 
-        executor = ThreadPoolExecutor(max_workers=1)
-        executor.submit(self.listener)
+        executor = ThreadPoolExecutor(max_workers=2)
+        executor.submit(self._listener)
+        executor.submit(self._sender)
 
-    def _send(self, send_buf: bytes, timeout_t: float) -> None:
-        timeout = False
-        while not self.ack:
-            if timeout:
-                print("Resending :)")
-
-            # Send data to socket
-            self.socket.sendto(send_buf, (self.dst_ip, self.dst_port))
-
-            # wait for ack before continuing
-            time_start = time.time()
-            while not self.ack:
-                time.sleep(0.001)
-                if time.time() - time_start > timeout_t:
-                    print("Timeout waiting for ack, resend")
-                    timeout = True
-                    break
-
-        self.ack = False
-        self.send_next_seq_n += 1
-
-    def send(self, data_bytes: bytes) -> None:
+    def send(self, data_bytes: bytes, timeout_s=None) -> None:
         """Note that data_bytes can be larger than one packet."""
+        timeout_s = timeout_s if timeout_s else self.ACK_TIMEOUT
+
         while data_bytes:
             if len(data_bytes) > Packet.PAYLOAD_SIZE:
                 recv_buf_size = len(data_bytes) - Packet.PAYLOAD_SIZE
@@ -149,29 +140,80 @@ class Streamer:
                 recv_buf_size=recv_buf_size,
                 payload=data_bytes[: Packet.PAYLOAD_SIZE],
             ).to_bytes()
-            self._send(send_buf, self.ACK_TIMEOUT)
-            print(
-                f"Sent (and recv'ed ack for): {data_bytes[:Packet.PAYLOAD_SIZE]}, remaining: {data_bytes[Packet.PAYLOAD_SIZE:]}"
-            )
+            self.send_q.put(InflightPacket(seq_n=self.send_next_seq_n, start_time=None, timeout_s=timeout_s, packet=send_buf))
+            self.send_next_seq_n += 1
+            # print(
+                # f"Sent (and recv'ed ack for): {data_bytes[:Packet.PAYLOAD_SIZE]}, remaining: {data_bytes[Packet.PAYLOAD_SIZE:]}"
+            # )
 
             data_bytes = data_bytes[Packet.PAYLOAD_SIZE :]
+    
+    def _sender(self):
+        """Sender background thread"""
+        inflight_q: List[InflightPacket] = []  # actual inflight packets
+
+        while not self.closed or not inflight_q.empty():
+            # print(f"Loop 1, {self.send_q.empty()}")
+            # First check send_q for new packets to send
+            while not self.send_q.empty() and len(inflight_q) < 25:
+                # print(f"Loop 2, {self.send_q.empty()}")
+                new_packet: InflightPacket = self.send_q.get()
+                new_packet.start_time = time.time()
+                self.socket.sendto(new_packet.packet, (self.dst_ip, self.dst_port))
+                inflight_q.append(new_packet)
+
+            # Check acks for inflight packets
+            # iterate through inflight packets, remove those <= acked_n
+            # for the packet (acked_n + 1), check timer
+            idx = 0
+            resend_all = False
+            for i, pack in enumerate(inflight_q):
+                if pack.seq_n <= self.acked_n:
+                    # packet has been acked, update idx to be removed
+                    idx = i
+                else:
+                    # earliest packet not acked, check timer
+                    if (time.time() - pack.start_time) > pack.timeout_s:
+                        # print(f"seq_n {pack.seq_n} timed out")
+                        resend_all = True
+
+                    break
+
+            inflight_q = inflight_q[idx:]
+            
+            if resend_all:
+                # if first packet after previous ack'ed timed out,
+                # all packets after have also timed out. Resend all
+                for pack in inflight_q:
+                    pack.start_time = time.time()
+                    self.socket.sendto(pack.packet, (self.dst_ip, self.dst_port))
+
 
     def recv(self) -> bytes:
         """Blocks (waits) if no data is ready to be read from the connection."""
         while not self.closed:
-            packet = self.buf_q.get()
+            packet = self.recv_q.get()
+            print(f"Recv'ed seq_n = {packet.seq_n}")
 
             if packet.seq_n == self.recv_expect_seq_n:
                 self.recv_expect_seq_n += 1
+
+                # send ack
+                send_buf = Packet(
+                    seq_n=packet.seq_n, recv_buf_size=0, ack=True
+                ).to_bytes()
+                self.socket.sendto(send_buf, (self.dst_ip, self.dst_port))
+
                 return packet.payload
 
             if packet.seq_n < self.recv_expect_seq_n:
                 # This packet was received twice, ignore
                 continue
             else:
-                self.buf_q.put(packet)
+                self.recv_q.put(packet)
 
-    def listener(self):
+    def _listener(self):
+        """Listener running in a background thread"""
         while not self.closed:
             try:
                 buf, addr = self.socket.recvfrom()
@@ -182,11 +224,11 @@ class Streamer:
                     packet = Packet.from_bytes(buf)
                 except PacketCorruptError:
                     # Ignore corrupt packets and wait for a resend due to timeout
-                    print("Corruption detected")
+                    # print("Corruption detected")
                     continue
 
                 if packet.ack:
-                    self.ack = True
+                    self.acked_n = packet.seq_n
                     if packet.fin:
                         self.should_close = True
                     continue
@@ -200,13 +242,7 @@ class Streamer:
                     self.should_close = True
                     continue
 
-                # send ack
-                send_buf = Packet(
-                    seq_n=packet.seq_n, recv_buf_size=0, ack=True
-                ).to_bytes()
-                self.socket.sendto(send_buf, (self.dst_ip, self.dst_port))
-
-                self.buf_q.put(packet)
+                self.recv_q.put(packet)
 
             except Exception as e:
                 print("Listener died!")
@@ -217,10 +253,10 @@ class Streamer:
         the necessary ACKs and retransmissions"""
         # your code goes here, especially after you add ACKs and retransmissions.
         if not self.should_close:
-            print(f"close called, queue size: {self.buf_q.qsize()}")
+            # print(f"close called, queue size: {self.buf_q.qsize()}")
             fin_pack = Packet(seq_n=self.send_next_seq_n, fin=True)
             # Sends and waits for FIN ACK
-            self._send(fin_pack.to_bytes(), 2)
+            self.send(fin_pack.to_bytes(), timeout_s=2)
             # Send ACK
             ack_pack = Packet(seq_n=self.send_next_seq_n, ack=True)
             self.socket.sendto(ack_pack.to_bytes(), (self.dst_ip, self.dst_port))
