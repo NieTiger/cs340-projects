@@ -3,11 +3,10 @@ import queue
 import struct
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from typing import ClassVar, List, NamedTuple
 
 # do not import anything else from socket except INADDR_ANY
 from socket import INADDR_ANY
-from typing import ClassVar, List
 
 # do not import anything else from loss_socket besides LossyUDP
 from lossy_socket import LossyUDP
@@ -24,8 +23,19 @@ class PacketCorruptError(ValueError):
     pass
 
 
-@dataclass(order=True)
-class Packet:
+# Format:
+# Long: seq_n
+# Long: recv_buf_size
+# Char: flags
+HEADER_FORMAT  = "LLB"
+
+HEADER_SIZE = len(struct.pack(HEADER_FORMAT, 0, 0, 0))
+HASH_SIZE = 32
+PACKET_SIZE = 1472
+PAYLOAD_SIZE = PACKET_SIZE - HEADER_SIZE - HASH_SIZE
+
+
+class Packet(NamedTuple):
     """Class for a single packet"""
 
     ### Header
@@ -39,29 +49,18 @@ class Packet:
     ### Payload
     payload: bytearray = b""
 
-    # Format:
-    # Long: seq_n
-    # Long: recv_buf_size
-    # Char: flags
-    HEADER_FORMAT: ClassVar = "LLB"
-
-    HEADER_SIZE: ClassVar = len(struct.pack(HEADER_FORMAT, 0, 0, 0))
-    HASH_SIZE: ClassVar = 32
-    PACKET_SIZE: ClassVar = 1472
-    PAYLOAD_SIZE: ClassVar = PACKET_SIZE - HEADER_SIZE - HASH_SIZE
-
     @classmethod
-    def from_bytes(cls, buf):
-        header_bytes = buf[:cls.HEADER_SIZE]
-        _hash = buf[cls.HEADER_SIZE : cls.HEADER_SIZE + cls.HASH_SIZE]
-        payload = buf[cls.HEADER_SIZE + cls.HASH_SIZE :]
+    def from_bytes(cls, buf) -> "Packet":
+        header_bytes = buf[:HEADER_SIZE]
+        _hash = buf[HEADER_SIZE : HEADER_SIZE + HASH_SIZE]
+        payload = buf[HEADER_SIZE + HASH_SIZE :]
 
         new_hash = calcHash(header_bytes + payload)
         if new_hash != _hash:
             raise PacketCorruptError
 
         seq_n, recv_buf_size, _flags = struct.unpack(
-            cls.HEADER_FORMAT, header_bytes
+            HEADER_FORMAT, header_bytes
         )
 
         # pack flags into a single byte like TCP
@@ -79,7 +78,7 @@ class Packet:
         _flags |= int(self.fin) << 7
 
         header_bytes = struct.pack(
-            self.HEADER_FORMAT,
+            HEADER_FORMAT,
             self.seq_n,
             self.recv_buf_size,
             _flags,
@@ -90,12 +89,32 @@ class Packet:
         return header_bytes + _hash + self.payload
 
 
-@dataclass(order=True)
 class InflightPacket:
     seq_n: int
     start_time: int
     timeout_s: int
     packet: bytes
+    
+    def __init__(self, seq_n=0, start_time=0, timeout_s=0, packet=b""):
+        self.seq_n = seq_n
+        self.start_time = start_time
+        self.timeout_s = timeout_s
+        self.packet = packet
+        
+    def __le__(self, other):
+        return self.seq_n <= other.seq_n
+
+    def __lt__(self, other):
+        return self.seq_n < other.seq_n
+
+    def __gt__(self, other):
+        return self.seq_n > other.seq_n
+
+    def __ge__(self, other):
+        return self.seq_n >= other.seq_n
+
+    def __eq__(self, other):
+        return self.seq_n == other.seq_n
 
 
 class Streamer:
@@ -130,23 +149,23 @@ class Streamer:
         timeout_s = timeout_s if timeout_s else self.ACK_TIMEOUT
 
         while data_bytes:
-            if len(data_bytes) > Packet.PAYLOAD_SIZE:
-                recv_buf_size = len(data_bytes) - Packet.PAYLOAD_SIZE
+            if len(data_bytes) > PAYLOAD_SIZE:
+                recv_buf_size = len(data_bytes) - PAYLOAD_SIZE
             else:
                 recv_buf_size = 0
 
             send_buf = Packet(
                 seq_n=self.send_next_seq_n,
                 recv_buf_size=recv_buf_size,
-                payload=data_bytes[: Packet.PAYLOAD_SIZE],
+                payload=data_bytes[: PAYLOAD_SIZE],
             ).to_bytes()
             self.send_q.put(InflightPacket(seq_n=self.send_next_seq_n, start_time=None, timeout_s=timeout_s, packet=send_buf))
             self.send_next_seq_n += 1
             # print(
-                # f"Sent (and recv'ed ack for): {data_bytes[:Packet.PAYLOAD_SIZE]}, remaining: {data_bytes[Packet.PAYLOAD_SIZE:]}"
+                # f"Sent (and recv'ed ack for): {data_bytes[:PAYLOAD_SIZE]}, remaining: {data_bytes[PAYLOAD_SIZE:]}"
             # )
 
-            data_bytes = data_bytes[Packet.PAYLOAD_SIZE :]
+            data_bytes = data_bytes[PAYLOAD_SIZE :]
     
     def _sender(self):
         """Sender background thread"""
