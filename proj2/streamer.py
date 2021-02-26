@@ -235,6 +235,7 @@ class Streamer:
     def _listener(self):
         """Listener running in a background thread"""
         while not self.closed:
+            print("Listener loop")
             try:
                 buf, addr = self.socket.recvfrom()
                 if not buf:
