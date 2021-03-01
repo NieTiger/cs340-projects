@@ -36,7 +36,7 @@ class Distance_Vector_Node(Node):
             outbound_cost = self.outbound_links[nid]
 
             for dest, (cost, path) in ndv.items():
-                if self.id in path:
+                if self.id in path or nid in path:
                     continue
                 curr_node = dv.get(dest)
                 if curr_node and (cost + outbound_cost) >= curr_node.cost:
@@ -90,7 +90,9 @@ class Distance_Vector_Node(Node):
     def process_incoming_routing_message(self, m):
         _from_id, _dv = json.loads(m)
         from_id = int(_from_id)
+
         if from_id not in self.outbound_links:
+            # make sure is a neighbor
             return
 
         dv = {int(nid): DV_Node(*node) for nid, node in _dv.items()}
