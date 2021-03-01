@@ -5,7 +5,7 @@ import math
 import heapq
 import unittest
 
-__all__ = ("Neighbor", "Edge", "Graph")
+__all__ = ("Neighbor", "Edge", "Graph", "dijkstra")
 
 class Neighbor(NamedTuple):
     id: int
@@ -203,7 +203,9 @@ class TestDijkstra(unittest.TestCase):
     def test1(self):
         g = _make_test_graph()
         pred, dist = dijkstra(g, 1)
-        breakpoint()
+        self.assertEqual(dist[1], 0)
+        self.assertEqual(dist[4], 4)
+        self.assertEqual(dist[5], 3)
 
 if __name__ == "__main__":
     unittest.main()
