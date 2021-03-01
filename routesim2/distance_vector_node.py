@@ -12,18 +12,6 @@ from adj_graph import Edge, Neighbor
 class DV_Node(NamedTuple):
     cost: int
     path: List[int]
-    
-
-def bellman_ford(nodes, edges: List[Edge], root):
-    dist = {i: math.inf for i in nodes}
-    prev = {i: None for i in nodes}
-    
-    dist[root] = 0
-
-    for _ in range(len(nodes)):
-        for edge in edges:
-            alt = dist[node1]
-
 
 
 class Distance_Vector_Node(Node):
@@ -38,13 +26,12 @@ class Distance_Vector_Node(Node):
         # neighbor_id -> cost
         self.outbound_links: Dict[int, int] = {}
 
-
     # Return a string
     def __str__(self):
         return f"<Node {self.id}, dv={self.dv}, oblinks={self.outbound_links}, neighbors_dv={self.neighbors_dv}>"
-    
+
     def update_dv(self) -> None:
-        dv = {}
+        dv: Dict[int, DV_Node] = {}
         for nid, ndv in self.neighbors_dv.items():
             outbound_cost = self.outbound_links[nid]
 
@@ -60,6 +47,9 @@ class Distance_Vector_Node(Node):
                     new_p = copy.deepcopy(path)
                     new_p.append(nid)
                     dv[dest] = DV_Node(cost + outbound_cost, new_p)
+
+        for nid, cost in self.outbound_links.items():
+            dv[nid] = DV_Node(cost, [nid])
 
         # if dv changes, send to neighbors
         _changed = False
@@ -80,38 +70,36 @@ class Distance_Vector_Node(Node):
                 break
 
         if _changed:
-            breakpoint()
             self.dv = dv
             self.send_to_neighbors(json.dumps((self.id, self.dv)))
 
     # Fill in this function
     def link_has_been_updated(self, neighbor, latency):
-        # latency = -1 if delete a link
         if latency >= 0:
             # create/update link to new node
-            self.dv[neighbor] = (latency, [neighbor])
             self.outbound_links[neighbor] = latency
-        else: # negative latency
-            if neighbor in self.dv:
-                # remove existing node
-                del self.dv[neighbor]
-                del self.outbound_links[neighbor]
-            else: 
-                return
+        elif neighbor in self.outbound_links:
+            # remove existing node
+            del self.outbound_links[neighbor], self.neighbors_dv[neighbor]
+        else:
+            return
 
         self.update_dv()
 
     # Fill in this function
     def process_incoming_routing_message(self, m):
-        from_id, dv = json.loads(m)
-        
-        self.neighbors_dv[from_id] = dv
+        _from_id, _dv = json.loads(m)
+        from_id = int(_from_id)
+        if from_id not in self.outbound_links:
+            return
 
+        dv = {int(nid): DV_Node(*node) for nid, node in _dv.items()}
+        self.neighbors_dv[from_id] = dv
         self.update_dv()
 
     # Return a neighbor, -1 if no path to destination
     def get_next_hop(self, destination):
         if destination in self.dv:
-            return self.dv[destination][1][-1]
+            return self.dv[destination].path[-1]
+        breakpoint()
         return -1
-
