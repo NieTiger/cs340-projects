@@ -7,9 +7,9 @@ import unittest
 
 __all__ = ("Neighbor", "Edge", "Graph", "dijkstra")
 
+
 class Neighbor(NamedTuple):
     id: int
-    seq_n: int
     weight: int
 
     def __lt__(self, other):
@@ -29,7 +29,6 @@ class Neighbor(NamedTuple):
 
 
 class Edge(NamedTuple):
-    seq_n: int
     weight: int
     node1: int
     node2: int
@@ -37,6 +36,7 @@ class Edge(NamedTuple):
 
 class _Graph(ABC):
     """Currently not used"""
+
     def new_vertex(self, u):
         raise NotImplementedError
 
@@ -45,19 +45,19 @@ class _Graph(ABC):
 
     def has_edge(self, u: int, v: int) -> bool:
         raise NotImplementedError
-    
+
     def get_vertices(self) -> Set[int]:
         raise NotImplementedError
-    
+
     def get_neighbors(self, v: int) -> Set[int]:
         raise NotImplementedError
-        
 
 
 class Graph:
     """
     Graph ADT
     """
+
     def __init__(self):
         self.adj: Dict[int, List[Neighbors]] = defaultdict(list)
 
@@ -65,12 +65,12 @@ class Graph:
         "If yes, return index of the neighbor in root's adj list, else return None"
         neighbors = self.adj[root]
         try:
-            i = neighbors.index(Neighbor(id=neighbor, seq_n=-1, weight=-1))
+            i = neighbors.index(Neighbor(id=neighbor, weight=-1))
         except ValueError:
             return None
         else:
             return i
-    
+
     def get_vertices(self) -> Set[int]:
         return set(self.adj.keys())
 
@@ -88,29 +88,27 @@ class Graph:
                 node1=n1,
                 node2=n2,
                 weight=self.adj[n1][i2].weight,
-                seq_n=self.adj[n1][i2].seq_n,
             )
         else:
             raise ValueError
 
-    def add_edge(self, n1: int, n2: int, weight: int, seq_n: int):
-        neighbor2 = Neighbor(id=n2, weight=weight, seq_n=seq_n)
-        neighbor1 = Neighbor(id=n1, weight=weight, seq_n=seq_n)
+    def add_edge(self, n1: int, n2: int, weight: int):
+        neighbor2 = Neighbor(id=n2, weight=weight)
+        neighbor1 = Neighbor(id=n1, weight=weight)
 
         self.adj[n1].append(neighbor2)
         self.adj[n2].append(neighbor1)
 
-    def update_edge(self, n1, n2, weight, seq_n):
+    def update_edge(self, n1, n2, weight):
         i2 = self._find_neighbor(n1, n2)
 
-        if self.adj[n1][i2].seq_n < seq_n:
-            neighbor2 = Neighbor(id=n2, weight=weight, seq_n=seq_n)
-            neighbor1 = Neighbor(id=n1, weight=weight, seq_n=seq_n)
+        neighbor2 = Neighbor(id=n2, weight=weight)
+        neighbor1 = Neighbor(id=n1, weight=weight)
 
-            i1 = self._find_neighbor(n2, n1)
+        i1 = self._find_neighbor(n2, n1)
 
-            self.adj[n1][i2] = neighbor2
-            self.adj[n2][i1] = neighbor1
+        self.adj[n1][i2] = neighbor2
+        self.adj[n2][i1] = neighbor1
 
     def remove_edge(self, n1, n2):
         i2 = self._find_neighbor(n1, n2)
@@ -130,31 +128,44 @@ def dijkstra(g: Graph, start: int) -> Tuple[Dict[int, int], Dict[int, int]]:
     pred: Dict[int, int] = {v: None for v in vertices}
     dist[start] = 0
     done: Set[int] = set()
-    todo: List[Tuple[int, int]] = [(0, start)] # priority queue of (distance, vertex)
-    
+    todo: List[Tuple[int, int]] = [(0, start)]  # priority queue of (distance, vertex)
+
     while todo:
         _, v = heapq.heappop(todo)
         if v not in done:
             done.add(v)
-            edges = g.get_neighbors(v)
-            for edge in edges:
+            for edge in g.get_neighbors(v):
                 u = edge.id
-                if dist[v] + edge.weight < dist[u]:
+                if dist[v] + edge.weight <= dist[u]:
                     dist[u] = dist[v] + edge.weight
                     pred[u] = v
                     heapq.heappush(todo, (dist[u], u))
 
     return pred, dist
 
+
 def _make_test_graph():
     g = Graph()
-    g.add_edge(1, 2, 1, 1)
-    g.add_edge(2, 3, 5, 1)
-    g.add_edge(3, 1, 2, 1)
+    g.add_edge(1, 2, 1)
+    g.add_edge(2, 3, 5)
+    g.add_edge(3, 1, 2)
 
-    g.add_edge(3, 4, 2, 1)
-    g.add_edge(3, 5, 1, 1)
-    g.add_edge(4, 5, 2, 1)
+    g.add_edge(3, 4, 2)
+    g.add_edge(3, 5, 1)
+    g.add_edge(4, 5, 2)
+    return g
+
+
+def _make_test_graph2():
+    g = Graph()
+    g.add_edge(1, 2, 1)
+    g.add_edge(1, 3, 2)
+    g.add_edge(2, 4, 3)
+    g.add_edge(2, 5, 6)
+    g.add_edge(3, 4, 5)
+    g.add_edge(3, 5, 4)
+    g.add_edge(4, 6, 6)
+    g.add_edge(5, 6, 3)
     return g
 
 
@@ -171,32 +182,31 @@ class TestGraph(unittest.TestCase):
 
     def test_update_edge(self):
         g = _make_test_graph()
-        g.update_edge(1, 2, 10, 2)
+        g.update_edge(1, 2, 10)
         e = g.get_edge(1, 2)
         self.assertEqual(e.weight, 10)
-        g.update_edge(1, 2, 20, 0)
+        g.update_edge(1, 2, 20)
         e = g.get_edge(1, 2)
-        self.assertEqual(e.weight, 10)
-        
+        self.assertEqual(e.weight, 20)
+
     def test_has_edge(self):
         g = _make_test_graph()
         self.assertTrue(g.has_edge(1, 2))
         self.assertTrue(g.has_edge(1, 3))
         self.assertTrue(g.has_edge(2, 3))
-        
-    
+
     def test_get_vertices(self):
         g = _make_test_graph()
         vset = g.get_vertices()
         self.assertIn(1, vset)
         self.assertIn(2, vset)
         self.assertIn(3, vset)
-    
+
     def test_get_neighbors(self):
         g = _make_test_graph()
         nbors = g.get_neighbors(1)
-        self.assertIn(Neighbor(id=2, seq_n=0, weight=0), nbors)
-        self.assertIn(Neighbor(id=3, seq_n=0, weight=0), nbors)
+        self.assertIn(Neighbor(id=2, weight=0), nbors)
+        self.assertIn(Neighbor(id=3, weight=0), nbors)
 
 
 class TestDijkstra(unittest.TestCase):
@@ -206,6 +216,22 @@ class TestDijkstra(unittest.TestCase):
         self.assertEqual(dist[1], 0)
         self.assertEqual(dist[4], 4)
         self.assertEqual(dist[5], 3)
+
+    def test2(self):
+        g = _make_test_graph2()
+        pred, dist = dijkstra(g, 1)
+        self.assertEqual(pred[6], 5)
+        self.assertEqual(pred[5], 3)
+        self.assertEqual(pred[4], 2)
+        self.assertEqual(pred[2], 1)
+        self.assertEqual(pred[3], 1)
+
+        self.assertEqual(dist[6], 9)
+        self.assertEqual(dist[5], 6)
+        self.assertEqual(dist[3], 2)
+        self.assertEqual(dist[2], 1)
+        self.assertEqual(dist[4], 4)
+
 
 if __name__ == "__main__":
     unittest.main()
