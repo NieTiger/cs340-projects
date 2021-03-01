@@ -1,18 +1,15 @@
 "python3 sim.py DISTANCE_VECTOR demo.event"
-from logging import root
-from typing import Dict, List, NamedTuple
+from typing import Dict, List, NamedTuple, Tuple
 import copy
 import json
-import math
 
 from simulator.node import Node
-from adj_graph import Edge, Neighbor
 
 
 class DV_Node(NamedTuple):
     cost: int
     path: List[int]
-
+    
 
 class Distance_Vector_Node(Node):
     def __init__(self, id):
@@ -21,8 +18,8 @@ class Distance_Vector_Node(Node):
         # destination -> ⟨cost, path⟩
         self.dv: Dict[int, DV_Node] = {}
 
-        # neighbor_id -> neighbor's dv
-        self.neighbors_dv: Dict = {}
+        # neighbor_id -> (seq_n, neighbor's dv)
+        self.neighbors_dv: Dict[int, Tuple(int, DV_Node)] = {}
         # neighbor_id -> cost
         self.outbound_links: Dict[int, int] = {}
 
@@ -32,7 +29,7 @@ class Distance_Vector_Node(Node):
 
     def update_dv(self) -> None:
         dv: Dict[int, DV_Node] = {}
-        for nid, ndv in self.neighbors_dv.items():
+        for nid, (_, ndv) in self.neighbors_dv.items():
             outbound_cost = self.outbound_links[nid]
 
             for dest, (cost, path) in ndv.items():
@@ -49,7 +46,8 @@ class Distance_Vector_Node(Node):
                     dv[dest] = DV_Node(cost + outbound_cost, new_p)
 
         for nid, cost in self.outbound_links.items():
-            dv[nid] = DV_Node(cost, [nid])
+            if not nid in dv or dv[nid].cost > cost:
+                dv[nid] = DV_Node(cost, [nid])
 
         # if dv changes, send to neighbors
         _changed = False
@@ -71,7 +69,7 @@ class Distance_Vector_Node(Node):
 
         if _changed:
             self.dv = dv
-            self.send_to_neighbors(json.dumps((self.id, self.dv)))
+            self.send_to_neighbors(json.dumps((self.id, self.get_time(), self.dv)))
 
     # Fill in this function
     def link_has_been_updated(self, neighbor, latency):
@@ -88,15 +86,18 @@ class Distance_Vector_Node(Node):
 
     # Fill in this function
     def process_incoming_routing_message(self, m):
-        _from_id, _dv = json.loads(m)
-        from_id = int(_from_id)
+        _from_id, _timestamp, _dv = json.loads(m)
+        from_id, timestamp = int(_from_id), int(_timestamp)
 
         if from_id not in self.outbound_links:
             # make sure is a neighbor
             return
+        
+        if from_id in self.neighbors_dv and self.neighbors_dv[from_id][0] >=  timestamp:
+            return
 
         dv = {int(nid): DV_Node(*node) for nid, node in _dv.items()}
-        self.neighbors_dv[from_id] = dv
+        self.neighbors_dv[from_id] = (timestamp, dv)
         self.update_dv()
 
     # Return a neighbor, -1 if no path to destination
