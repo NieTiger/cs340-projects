@@ -59,7 +59,7 @@ class Graph:
     """
 
     def __init__(self):
-        self.adj: Dict[int, List[Neighbors]] = defaultdict(list)
+        self.adj: Dict[int, List[Neighbor]] = defaultdict(list)
 
     def _find_neighbor(self, root, neighbor):
         "If yes, return index of the neighbor in root's adj list, else return None"
