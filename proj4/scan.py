@@ -85,9 +85,11 @@ def reverse_nslookup(ipv4_addrs: List[str]) -> List[str]:
 
 def _nslookup(url: str, dns_server: str) -> Tuple[List[str], List[str]]:
     ipv4_addrs, ipv6_addrs = [], []
-    
+
     try:
-        proc = subprocess.run(["nslookup", url, dns_server], capture_output=True, timeout=5)
+        proc = subprocess.run(
+            ["nslookup", url, dns_server], capture_output=True, timeout=5
+        )
     except subprocess.TimeoutExpired:
         return ipv4_addrs, ipv6_addrs
 
@@ -140,22 +142,18 @@ def get_server_info(url: str, n_redir=10) -> ServerInfo:
     logger.debug("get_server_info: %s", url)
     redirect_to_https = False
     insecure_http = False
-    
+
     with requests.Session() as session:
         session.max_redirects = n_redir
         session.headers = {"User-Agent", USER_AGENT}
-        
+
         # Try insecure HTTP
         try:
-            resp = session.get(
-                "http://" + url, timeout=4, allow_redirects=True
-            )
+            resp = session.get("http://" + url, timeout=4, allow_redirects=True)
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
             # Try HTTPS
             try:
-                resp = session.get(
-                    "https://" + url, timeout=4, allow_redirects=True
-                )
+                resp = session.get("https://" + url, timeout=4, allow_redirects=True)
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
                 return ServerInfo()
         else:
@@ -243,7 +241,7 @@ def get_rtt(ip_list: List[str]) -> Tuple[Optional[int], Optional[int]]:
             at_least_one = True
             _min = min(_min, t)
             _max = max(_max, t)
-        
+
     if not at_least_one:
         return None, None
 
@@ -312,16 +310,16 @@ def scan_urls(input_file: str, output_file: str) -> Dict:
 
     ## concurrent version
     # with concurrent.futures.ThreadPoolExecutor() as executor:
-    #     futures = []
+    # futures = []
 
-    #     for url in urls:
-    #         executor.submit(scan_url, url)
+    # for url in urls:
+    # executor.submit(scan_url, url)
 
-    #     for future in futures:
-    #         url, d = future.result()
-    #         data[url] = d
-    
-    ## sequential version
+    # for future in futures:
+    # url, d = future.result()
+    # data[url] = d
+
+    # sequential version
     for url in urls:
         data[url] = scan_url(url)[1]
 

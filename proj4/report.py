@@ -70,8 +70,6 @@ def web_server_table(data: dict) -> str:
     table.add_row(("web server", "number of occurences"))
 
     for server, count in counter.most_common():  # List[value, count]
-        if "SSL" in server:
-            breakpoint()
         table.add_row((server, str(count)))
 
     return table.draw()
@@ -133,11 +131,16 @@ def percentage_table(data: dict) -> str:
             d["ipv6"] += 1
 
     l = len(data)
+    if l == 0:
+        return table.draw()
+
     for k, v in tlsv.items():
-        table.add_row((k, f"{round(v/l * 100, 2)}%"))
+        percentage = round(v / l * 100, 2)
+        table.add_row((k, f"{percentage}%"))
 
     for k, v in d.items():
-        table.add_row((k, f"{round(v/l * 100, 2)}%"))
+        percentage = round(v / l * 100, 2)
+        table.add_row((k, f"{percentage}%"))
 
     return table.draw()
 
