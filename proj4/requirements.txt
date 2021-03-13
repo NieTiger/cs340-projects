@@ -1,1 +1,3 @@
 texttable
+maxminddb
+requests
