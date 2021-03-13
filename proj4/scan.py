@@ -25,6 +25,7 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 import asyncio
 import concurrent.futures
 import json
+import math
 import re
 import socket
 import subprocess
@@ -56,21 +57,14 @@ DNS_SERVERS = (
 )
 
 
-def run_cmd(cmd: List):
-    try:
-        result = subprocess.check_output(
-            cmd, timeout=5, stderr=subprocess.STDOUT
-        ).decode("utf-8")
-    except subprocess.TimeoutExpired:
-        return None
-    else:
-        return result
-
-
 def _reverse_nslookup(ipv4: str, dns_server) -> List[str]:
-    proc = subprocess.run(
-        ["nslookup", "-type=PTR", ipv4, dns_server], capture_output=True, timeout=5
-    )
+    try:
+        proc = subprocess.run(
+            ["nslookup", "-type=PTR", ipv4, dns_server], capture_output=True, timeout=5
+        )
+    except subprocess.TimeoutExpired:
+        return []
+
     result = proc.stdout.decode()
     if not result:  # failed
         return []
@@ -91,10 +85,17 @@ def reverse_nslookup(ipv4_addrs: List[str]) -> List[str]:
 
 def _nslookup(url: str, dns_server: str) -> Tuple[List[str], List[str]]:
     ipv4_addrs, ipv6_addrs = [], []
-    result = run_cmd(["nslookup", url, dns_server])
+    
+    try:
+        proc = subprocess.run(["nslookup", url, dns_server], capture_output=True, timeout=5)
+    except subprocess.TimeoutExpired:
+        return ipv4_addrs, ipv6_addrs
+
+    result = proc.stdout.decode()
 
     if not result:  # failed
         return ipv4_addrs, ipv6_addrs
+
     answers = result.strip().split("\n\n")[1]
     for line in answers.split("\n"):
         if not line.startswith("Address:"):
@@ -159,9 +160,8 @@ def get_server_info(url: str, n_redir=10) -> ServerInfo:
                 return ServerInfo()
         else:
             insecure_http = True
-    
-    if len(resp.history) > 1 and resp.history[0].is_redirect and resp.history[1].url.startswith("https"):
-        redirect_to_https = True
+            if resp.history and resp.url.startswith("https"):
+                redirect_to_https = True
 
     server = resp.headers.get("server")
     hsts = "Strict-Transport-Security" in resp.headers
@@ -198,7 +198,7 @@ def get_ssl_tls_version(url: str) -> List[str]:
     return versions
 
 
-def get_root_ca(url: str) -> str:
+def get_root_ca(url: str) -> Optional[str]:
     logger.debug("get_root_ca: %s", url)
     proc = subprocess.run(
         ["openssl", "s_client", "-connect", url + ":443"],
@@ -210,30 +210,42 @@ def get_root_ca(url: str) -> str:
     i2 = s[i1:].find("--")
     cchain = s[i1 : i1 + i2]
     if not cchain:
-        return ""
+        return None
     ca = re.findall(r"O\s=\s[^,]+,", cchain)[-1]
     return ca[:-1].split(" = ")[1].strip()
 
 
-def _rtt(ip: str, port: int = 443):
+def _rtt(ip: str, port: int = 443) -> Optional[int]:
+    TIMEOUT_S = 2
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        start = time.time()
-        sock.connect((ip, port))
-        elapsed = time.time() - start
+    try:
+        socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(TIMEOUT_S)
+            start = time.time()
+            sock.connect((ip, port))
+            elapsed = time.time() - start
+    except (TimeoutError, OSError):
+        return None
 
     return round(elapsed * 1000)
 
 
-def get_rtt(ip_list: List[str]) -> Tuple[float, float]:
+def get_rtt(ip_list: List[str]) -> Tuple[Optional[int], Optional[int]]:
     logger.debug("get_rtt: %s", ip_list)
-    _min = float("inf")
-    _max = float("-inf")
+    _min = math.inf
+    _max = -math.inf
+    at_least_one = False
 
     for ip in ip_list:
         t = _rtt(ip)
-        _min = min(_min, t)
-        _max = max(_max, t)
+        if t:
+            at_least_one = True
+            _min = min(_min, t)
+            _max = max(_max, t)
+        
+    if not at_least_one:
+        return None, None
 
     return _min, _max
 
@@ -249,8 +261,8 @@ def get_geo_locations(ip_list: List[str]) -> List[str]:
             city = temp["city"]["names"]["en"]
             builder.append(city)
         if "subdivisions" in temp:
-            subdivision = temp["subdivisions"][0]["names"]["en"]
-            builder.append(subdivision)
+            for nn in temp["subdivisions"]:
+                builder.append(nn["names"]["en"])
         if "country" in temp:
             country = temp["country"]["names"]["en"]
             builder.append(country)
@@ -267,17 +279,7 @@ def scan_url(url: str) -> Dict:
     logger.info(f"Scanning {url}")
     start = time.time()
     ipv4, ipv6 = nslookup(url)
-
-    server = None
-    insecure = None
-    redirect = None
-    hsts = None
-    try:
-        server, hsts, redirect, insecure = get_server_info(url)
-    except Exception as e:
-        # wtf
-        logger.exception(e)
-
+    server, hsts, redirect, insecure = get_server_info(url)
     tls_versions = get_ssl_tls_version(url)
     root_ca = get_root_ca(url)
     rdns_names = reverse_nslookup(ipv4)
@@ -302,6 +304,7 @@ def scan_url(url: str) -> Dict:
 
 
 def scan_urls(input_file: str, output_file: str) -> Dict:
+    start = time.time()
     data = {}
 
     with open(input_file, "r") as fp:
@@ -325,6 +328,8 @@ def scan_urls(input_file: str, output_file: str) -> Dict:
     with open(output_file, "w") as fp:
         json.dump(data, fp, sort_keys=True, indent=4)
 
+    elapsed = time.time() - start
+    logger.info("Scanner took %.3f seconds total", elapsed)
     return data
 
 
