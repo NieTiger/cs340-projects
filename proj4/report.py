@@ -15,7 +15,7 @@ def format_data(data: dict) -> str:
             if isinstance(v, list):
                 table.add_row((k, "\n".join(str(i) for i in v)))
             else:
-                table.add_row((k, v))
+                table.add_row((k, str(v)))
         builder.append(table.draw())
         builder.append("\n")
 
