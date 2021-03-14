@@ -37,7 +37,7 @@ import maxminddb
 import requests
 
 logging.basicConfig(
-    format="%(asctime)s %(levelname)s:%(name)s: %(message)s", level=logging.DEBUG
+    format="%(asctime)s %(levelname)s:%(name)s: %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -60,13 +60,18 @@ DNS_SERVERS = (
 def _reverse_nslookup(ipv4: str, dns_server) -> List[str]:
     try:
         proc = subprocess.run(
-            ["nslookup", "-type=PTR", ipv4, dns_server], capture_output=True, timeout=5
+            ["nslookup", "-type=PTR", ipv4, dns_server],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
         )
     except subprocess.TimeoutExpired:
+        logger.error("reverse_nslookup timed out for %s", ipv4)
         return []
 
     result = proc.stdout.decode()
     if not result:  # failed
+        logger.error("reverse_nslookup failed for %s", ipv4)
         return []
 
     addrs = re.findall(r"name\s=\s[\w\.]+", result)
@@ -84,11 +89,15 @@ def reverse_nslookup(ipv4_addrs: List[str]) -> List[str]:
 
 
 def _nslookup(url: str, dns_server: str) -> Tuple[List[str], List[str]]:
-    ipv4_addrs, ipv6_addrs = [], []
+    ipv4_addrs: List[str] = []
+    ipv6_addrs: List[str] = []
 
     try:
         proc = subprocess.run(
-            ["nslookup", url, dns_server], capture_output=True, timeout=5
+            ["nslookup", url, dns_server],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
         )
     except subprocess.TimeoutExpired:
         return ipv4_addrs, ipv6_addrs
@@ -145,16 +154,20 @@ def get_server_info(url: str, n_redir=10) -> ServerInfo:
 
     with requests.Session() as session:
         session.max_redirects = n_redir
-        session.headers = {"User-Agent", USER_AGENT}
+        session.headers["User-Agent"] = USER_AGENT
 
         # Try insecure HTTP
         try:
-            resp = session.get("http://" + url, timeout=4, allow_redirects=True)
+            resp = session.get("http://" + url, timeout=5, allow_redirects=True)
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            logger.error("GET request timed out for %s", "http://" + url)
             # Try HTTPS
             try:
-                resp = session.get("https://" + url, timeout=4, allow_redirects=True)
+                resp = session.get("https://" + url, timeout=5, allow_redirects=True)
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+                logger.error(
+                    "get_server_info: GET request timed out for %s", "https://" + url
+                )
                 return ServerInfo()
         else:
             insecure_http = True
@@ -174,62 +187,79 @@ def get_server_info(url: str, n_redir=10) -> ServerInfo:
 
 def get_ssl_tls_version(url: str) -> List[str]:
     logger.debug("get_ssl_tls_version: %s", url)
-    versions = []
+    versions: List[str] = []
 
     # Scan for protocols with nmap
     proc = subprocess.run(
-        ["nmap", "--script", "ssl-enum-ciphers", "-p", "443", url], capture_output=True
+        ["nmap", "--script", "ssl-enum-ciphers", "-p", "443", url],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
     nmap_output = proc.stdout.decode()
     vers = re.findall(r"\|\s\s\s[\w.]+", nmap_output)
     versions.extend(v.split()[1] for v in vers)
 
     # Check TLSv1.3 with openssl
-    proc = subprocess.run(
-        ["openssl", "s_client", "-tls1_3", "-connect", url + ":443"],
-        input=b"",
-        capture_output=True,
-    )
-    if re.search(r"TLSv1.3", proc.stdout.decode()):
-        versions.append("TLSv1.3")
+    try:
+        proc = subprocess.run(
+            ["openssl", "s_client", "-tls1_3", "-connect", url + ":443"],
+            input=b"",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error("get_ssl_tls_version: openssl timed out for %s", url)
+    else:
+        if re.search(r"TLSv1.3", proc.stdout.decode()):
+            versions.append("TLSv1.3")
 
     return versions
 
 
 def get_root_ca(url: str) -> Optional[str]:
     logger.debug("get_root_ca: %s", url)
-    proc = subprocess.run(
-        ["openssl", "s_client", "-connect", url + ":443"],
-        input=b"",
-        capture_output=True,
-    )
+    try:
+        proc = subprocess.run(
+            ["openssl", "s_client", "-connect", url + ":443"],
+            input=b"",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error("get_root_ca: openssl timed out for %s", url)
+        return None
+
     s = proc.stdout.decode()
     i1 = s.find("Certificate chain")
     i2 = s[i1:].find("--")
     cchain = s[i1 : i1 + i2]
-    if not cchain:
+    try:
+        ca = re.findall(r"O\s=\s[^,]+,", cchain)[-1]
+    except IndexError:
+        logger.error("get_root_ca: failed for %s", url)
         return None
-    ca = re.findall(r"O\s=\s[^,]+,", cchain)[-1]
     return ca[:-1].split(" = ")[1].strip()
 
 
-def _rtt(ip: str, port: int = 443) -> Optional[int]:
+def _rtt(ip: str, port: int = 443) -> Optional[float]:
     TIMEOUT_S = 2
 
     try:
-        socket
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(TIMEOUT_S)
             start = time.time()
             sock.connect((ip, port))
             elapsed = time.time() - start
     except (TimeoutError, OSError):
+        logger.error("get_rtt: timed out for %s", ip)
         return None
 
     return round(elapsed * 1000)
 
 
-def get_rtt(ip_list: List[str]) -> Tuple[Optional[int], Optional[int]]:
+def get_rtt(ip_list: List[str]) -> Tuple[Optional[float], Optional[float]]:
     logger.debug("get_rtt: %s", ip_list)
     _min = math.inf
     _max = -math.inf
@@ -251,18 +281,18 @@ def get_rtt(ip_list: List[str]) -> Tuple[Optional[int], Optional[int]]:
 def get_geo_locations(ip_list: List[str]) -> List[str]:
     logger.debug("get_geo_locations: %s", ip_list)
     reader = maxminddb.open_database("GeoLite2-City.mmdb")
-    locations = []
+    locations: List[str] = []
     for ip in ip_list:
-        temp = reader.get(ip)
+        tmp: Dict = reader.get(ip)
         builder = []
-        if "city" in temp:
-            city = temp["city"]["names"]["en"]
+        if "city" in tmp:
+            city = tmp["city"]["names"]["en"]
             builder.append(city)
-        if "subdivisions" in temp:
-            for nn in temp["subdivisions"]:
+        if "subdivisions" in tmp:
+            for nn in tmp["subdivisions"]:
                 builder.append(nn["names"]["en"])
-        if "country" in temp:
-            country = temp["country"]["names"]["en"]
+        if "country" in tmp:
+            country = tmp["country"]["names"]["en"]
             builder.append(country)
 
         s = ", ".join(builder)
@@ -272,7 +302,7 @@ def get_geo_locations(ip_list: List[str]) -> List[str]:
     return list(set(locations))
 
 
-def scan_url(url: str) -> Dict:
+def scan_url(url: str) -> Tuple[str, Dict]:
     ""
     logger.info(f"Scanning {url}")
     start = time.time()
@@ -301,33 +331,36 @@ def scan_url(url: str) -> Dict:
     return url, d
 
 
-def scan_urls(input_file: str, output_file: str) -> Dict:
+def scan_urls(input_file: str, output_file: str, parallel: bool = True) -> Dict:
     start = time.time()
     data = {}
 
     with open(input_file, "r") as fp:
         urls = fp.read().strip().split("\n")
 
-    ## concurrent version
-    # with concurrent.futures.ThreadPoolExecutor() as executor:
-    # futures = []
+    if parallel:
+        logger.info("Starting scan with 8 worker threads ...")
+        ## concurrent version
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures: List[concurrent.futures.Future] = []
 
-    # for url in urls:
-    # executor.submit(scan_url, url)
+            for url in urls:
+                futures.append(executor.submit(scan_url, url))
 
-    # for future in futures:
-    # url, d = future.result()
-    # data[url] = d
-
-    # sequential version
-    for url in urls:
-        data[url] = scan_url(url)[1]
+            for future in futures:
+                url, d = future.result()
+                data[url] = d
+    else:
+        logger.info("Starting scan ...")
+        # sequential version
+        for url in urls:
+            data[url] = scan_url(url)[1]
 
     with open(output_file, "w") as fp:
         json.dump(data, fp, sort_keys=True, indent=4)
 
     elapsed = time.time() - start
-    logger.info("Scanner took %.3f seconds total", elapsed)
+    logger.info("Scanner finished in %.3f seconds.", elapsed)
     return data
 
 

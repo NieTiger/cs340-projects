@@ -1,3 +1,3 @@
-texttable
-maxminddb
-requests
+maxminddb==2.0.3
+requests==2.25.1
+texttable==1.6.3
